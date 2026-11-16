@@ -4,7 +4,7 @@
  * Pure function over the year's booking sums per category, type and VAT
  * rate (`BookingRepository.sumByCategoryAndVatRate`) and the categories; the
  * service (`euer-service.ts`) loads both in one unit of work. Every rule is
- * documented in docs/data-model.md, "EÜR-Berechnung (#25)":
+ * documented in docs/data-model.md, "EÜR calculation (#25)":
  *
  * - The **tax status of the year** decides, not the VAT rate of a booking.
  *   Small business: gross into the category's position, turnover remapped to

@@ -1,519 +1,509 @@
-# Datenmodell
+# Data model
 
-SQLite, beschrieben als Drizzle-Schema in
-[`src/persistence/schema.ts`](../src/persistence/schema.ts). Das Schema ist die
-Quelle der Wahrheit; die SQL-Migrationen erzeugt `drizzle-kit` daraus.
+SQLite, described as a Drizzle schema in
+[`src/persistence/schema.ts`](../src/persistence/schema.ts). The schema is the
+source of truth; `drizzle-kit` generates the SQL migrations from it.
 
-## Tabellen
+## Tables
 
-| Tabelle      | Spalten                                                                                                                                                                                                          |
+| Table        | Columns                                                                                                                                                                                                          |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bookings`   | `id`, `date`, `type`, `gross_cents`, `vat_rate`, `net_cents`, `vat_cents`, `category_id` → `categories`, `description`, `counterparty`, `reference`, `note`, `source`, `external_id`, `created_at`, `updated_at` |
 | `categories` | `id`, `name`, `type`, `euer_position`, `reduces_income`, `archived`, `is_system`                                                                                                                                 |
 | `tax_years`  | `year` (PK), `small_business`                                                                                                                                                                                    |
-| `settings`   | `key` (PK), `value` – Stripe (#28): `stripe.apiKey`, `stripe.defaultVatRate`, `stripe.feeCategoryId`, `stripe.refundCategoryId`, Import (#30): `stripe.lastImportAt`, `stripe.lastImportTo`                      |
+| `settings`   | `key` (PK), `value` – Stripe (#28): `stripe.apiKey`, `stripe.defaultVatRate`, `stripe.feeCategoryId`, `stripe.refundCategoryId`, import (#30): `stripe.lastImportAt`, `stripe.lastImportTo`                      |
 
-Indizes: `bookings_date_idx` (`date`), `bookings_category_id_idx`
-(`category_id`), `bookings_source_external_id_unique` (eindeutig auf
-`source, external_id` **wo `external_id IS NOT NULL`**),
+Indexes: `bookings_date_idx` (`date`), `bookings_category_id_idx`
+(`category_id`), `bookings_source_external_id_unique` (unique on
+`source, external_id` **where `external_id IS NOT NULL`**),
 `categories_type_name_unique` (`type, name`).
 
-## Entscheidungen
+## Decisions
 
-| Thema             | Entscheidung                                                                                                                                                                                                                                                                                                                                                                             |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| IDs               | `INTEGER PRIMARY KEY AUTOINCREMENT`. Einfach, sortierbar, klein. UUIDs bringen nichts: Es gibt keine verteilte Erzeugung, und Stripe-Duplikate erkennt `external_id`. `AUTOINCREMENT` verhindert, dass IDs gelöschter Zeilen wiederverwendet werden.                                                                                                                                     |
-| Datum             | `TEXT` als ISO-Kalenderdatum `YYYY-MM-DD` (wie `formatDate` erwartet), ohne Zeit/Zeitzone. Sortiert lexikografisch korrekt; das EÜR-Jahr ist `substr(date, 1, 4)` bzw. ein Bereichsvergleich. CHECK `date(date) IS date` weist Formatfehler und nicht existierende Tage (`2025-02-30`) zurück.                                                                                           |
-| Zeitstempel       | `created_at`/`updated_at` als `TEXT` im Format von `Date#toISOString()` (UTC, `2025-03-07T12:34:56.789Z`). Kein DB-Default: Die Repositories (#11) setzen beide Werte, damit Tests eine feste Uhr nutzen können.                                                                                                                                                                         |
-| Beträge           | `INTEGER` in Cent. `gross_cents > 0` (Beträge immer positiv, #1), `net_cents`/`vat_cents >= 0` und `net_cents + vat_cents = gross_cents`; alle drei mit CHECK `typeof(x) = 'integer'`. Netto/USt berechnet Business; die DB sichert nur die Konsistenz.                                                                                                                                  |
-| USt-Satz          | `TEXT`: `'0'`, `'7'`, `'19'`, `'reverse_charge'` oder `NULL` (kein Satz erfasst, Kleinunternehmer). Text statt Zahl, damit Reverse Charge kein Sonderwert ist und `0 %` eindeutig von „kein Satz“ unterscheidbar bleibt. USt (`vat_cents > 0`) gibt es nur bei `'7'` und `'19'`; der CHECK nutzt `coalesce(vat_rate, '')`, weil `NULL IN (…)` NULL ergibt und den CHECK passieren ließe. |
-| Enums             | `TEXT` mit CHECK (`type`: `income`/`expense`, `source`: `manual`/`stripe`). Die erlaubten Werte stehen als Konstanten im Schema; Business hat eigene Domänentypen (#11), die Repositories bilden ab.                                                                                                                                                                                     |
-| Booleans          | `INTEGER` 0/1 (Drizzle `mode: "boolean"`), `NOT NULL DEFAULT false`, CHECK `IN (0, 1)`.                                                                                                                                                                                                                                                                                                  |
-| Pflichtfelder     | `description` und `counterparty` sind `NOT NULL`; `reference`, `note`, `external_id`, `vat_rate` optional. Leere Strings verhindert Business, nicht die DB – Ausnahme `external_id`: `''` ist per CHECK verboten, weil es im Unique-Index wie eine echte ID kollidieren würde.                                                                                                           |
-| Kategorie         | `category_id` `NOT NULL`, Fremdschlüssel mit `ON DELETE RESTRICT`: Kategorien mit Buchungen werden archiviert statt gelöscht. Dass Art der Buchung und der Kategorie übereinstimmen, prüft Business.                                                                                                                                                                                     |
-| Kategorienamen    | Eindeutig pro Art (`type, name`), in der DB mit Groß-/Kleinschreibung (SQLite-`NOCASE` kennt keine Umlaute). Business (#14/#15) normalisiert Namen (trimmen) und vergleicht vor dem Speichern ohne Groß-/Kleinschreibung (`toLocaleLowerCase("de")`, inkl. Umlaute). „Mindert Einnahmen“ nur bei Ausgabe-Kategorien (CHECK), da Rückerstattungen Ausgaben sind (#1).                     |
-| EÜR-Position      | `euer_position` ist ein stabiler Schlüssel (`TEXT`, z. B. `BETRIEBSEINNAHMEN_UST_PFLICHTIG`) ohne CHECK – die Liste der Positionen lebt im Code ([EÜR-Positionen](#eür-positionen-13)) und darf wachsen, ohne dass eine Migration nötig ist. Business prüft den Wert (`validateCategoryPosition`).                                                                                       |
-| Steuerjahre       | `year` (`INTEGER`, 1000–9999) ist der Primärschlüssel.                                                                                                                                                                                                                                                                                                                                   |
-| Duplikatschutz    | Partieller Unique-Index auf `(source, external_id) WHERE external_id IS NOT NULL`: Manuelle Buchungen ohne externe ID kollidieren nie; gelöschte Stripe-Buchungen können erneut importiert werden.                                                                                                                                                                                       |
-| Spalten in CHECKs | Im Schema über `col(...)` unqualifiziert (`"date"` statt `"bookings"."date"`). Baut drizzle-kit eine Tabelle in einer späteren Migration als `__new_<tabelle>` neu auf, übernimmt es den Constraint-Text; ein Verweis auf `"bookings"` schlüge dort fehl.                                                                                                                                |
+| Topic             | Decision                                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IDs               | `INTEGER PRIMARY KEY AUTOINCREMENT`. Simple, sortable, small. UUIDs add nothing: there is no distributed generation, and `external_id` detects Stripe duplicates. `AUTOINCREMENT` prevents IDs of deleted rows from being reused.                                                                                                                                             |
+| Date              | `TEXT` as an ISO calendar date `YYYY-MM-DD` (as `formatDate` expects), without time/time zone. Sorts correctly lexicographically; the EÜR year is `substr(date, 1, 4)` or a range comparison. CHECK `date(date) IS date` rejects format errors and non-existent days (`2025-02-30`).                                                                                          |
+| Timestamps        | `created_at`/`updated_at` as `TEXT` in the format of `Date#toISOString()` (UTC, `2025-03-07T12:34:56.789Z`). No DB default: the repositories (#11) set both values so tests can use a fixed clock.                                                                                                                                                                            |
+| Amounts           | `INTEGER` in cents. `gross_cents > 0` (amounts always positive, #1), `net_cents`/`vat_cents >= 0` and `net_cents + vat_cents = gross_cents`; all three with CHECK `typeof(x) = 'integer'`. Business computes net/VAT; the DB only guarantees consistency.                                                                                                                     |
+| VAT rate          | `TEXT`: `'0'`, `'7'`, `'19'`, `'reverse_charge'` or `NULL` (no rate recorded, small business). Text instead of a number so reverse charge is not a special value and `0 %` stays clearly distinct from "no rate". VAT (`vat_cents > 0`) only exists for `'7'` and `'19'`; the CHECK uses `coalesce(vat_rate, '')` because `NULL IN (…)` yields NULL and would pass the CHECK. |
+| Enums             | `TEXT` with CHECK (`type`: `income`/`expense`, `source`: `manual`/`stripe`). The allowed values are constants in the schema; business has its own domain types (#11), the repositories map between them.                                                                                                                                                                      |
+| Booleans          | `INTEGER` 0/1 (Drizzle `mode: "boolean"`), `NOT NULL DEFAULT false`, CHECK `IN (0, 1)`.                                                                                                                                                                                                                                                                                       |
+| Required fields   | `description` and `counterparty` are `NOT NULL`; `reference`, `note`, `external_id`, `vat_rate` optional. Business prevents empty strings, not the DB – exception `external_id`: `''` is forbidden by CHECK because it would collide like a real ID in the unique index.                                                                                                      |
+| Category          | `category_id` `NOT NULL`, foreign key with `ON DELETE RESTRICT`: categories with bookings are archived instead of deleted. Business checks that the booking type matches the category type.                                                                                                                                                                                   |
+| Category names    | Unique per type (`type, name`), case-sensitive in the DB (SQLite `NOCASE` does not know umlauts). Business (#14/#15) normalises names (trim) and compares case-insensitively before saving (`toLocaleLowerCase("de")`, including umlauts). "Reduces income" only for expense categories (CHECK), since refunds are expenses (#1).                                             |
+| EÜR position      | `euer_position` is a stable key (`TEXT`, e.g. `BETRIEBSEINNAHMEN_UST_PFLICHTIG`) without CHECK – the list of positions lives in code ([EÜR positions](#eür-positions-13)) and may grow without needing a migration. Business validates the value (`validateCategoryPosition`).                                                                                                |
+| Tax years         | `year` (`INTEGER`, 1000–9999) is the primary key.                                                                                                                                                                                                                                                                                                                             |
+| Duplicate guard   | Partial unique index on `(source, external_id) WHERE external_id IS NOT NULL`: manual bookings without an external ID never collide; deleted Stripe bookings can be imported again.                                                                                                                                                                                           |
+| Columns in CHECKs | Unqualified in the schema via `col(...)` (`"date"` instead of `"bookings"."date"`). When drizzle-kit rebuilds a table as `__new_<table>` in a later migration, it copies the constraint text; a reference to `"bookings"` would fail there.                                                                                                                                   |
 
-`STRICT`-Tabellen unterstützt drizzle-kit nicht; ohne die `typeof`-CHECKs
-würde SQLite z. B. `1.5` in einer `INTEGER`-Spalte speichern. Text wie `'100'`
-wandelt die Typ-Affinität der Spalte schon vor dem CHECK in die Zahl `100` um;
-er wird daher als ganze Cent akzeptiert (siehe Test).
+drizzle-kit does not support `STRICT` tables; without the `typeof` CHECKs
+SQLite would store e.g. `1.5` in an `INTEGER` column. Text like `'100'` is
+converted to the number `100` by the column's type affinity before the CHECK
+runs; it is therefore accepted as whole cents (see test).
 
-## EÜR-Positionen (#13)
+## EÜR positions (#13)
 
-Code in [`src/business/euer`](../src/business/euer) (rein, ohne DB – bis auf die Services, die über Unit of Work bzw. `FileSaver` laden und speichern):
+Code in [`src/business/euer`](../src/business/euer) (pure, no DB – except for
+the services, which load and save via unit of work or `FileSaver`):
 
-| Datei                    | Inhalt                                                                                                                              |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `positions.ts`           | `EUER_POSITIONS` (stabile Schlüssel), `EUER_POSITION_DEFINITIONS` (Seite, zuweisbar, Kleinunternehmer-Ziel), `positionForTaxStatus` |
-| `line-mapping.ts`        | `EUER_LINE_MAPPINGS` (Jahr → Position → Zeile + amtliche Bezeichnung), `describePosition(position, year)`, `hasLineMapping(year)`   |
-| `category-position.ts`   | `validateCategoryPosition({ type, euerPosition, reducesIncome })` für den Kategorien-Service (#15)                                  |
-| `calculate-euer.ts`      | `calculateEuer({ year, smallBusiness, groups, categories })` – die EÜR-Berechnung (#25), rein                                       |
-| `euer-service.ts`        | `createEuerService({ unitOfWork })` mit `calculate(year)`: Status, Kategorien und Summen in einer Unit of Work                      |
-| `report-order.ts`        | `incomeInReportOrder(result)`: Einnahmezeilen in Formularreihenfolge, Zeile 13 nach Zeile 12 (Ansicht #26, Export #27)              |
-| `euer-csv.ts`            | `euerToCsv(result, labels)` – CSV der EÜR (#27, siehe docs/architecture.md)                                                         |
-| `euer-export-service.ts` | `createEuerExportService({ euer, fileSaver })` mit `exportCsv(…)`: berechnen, Speicherdialog, schreiben                             |
+| File                     | Contents                                                                                                                      |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `positions.ts`           | `EUER_POSITIONS` (stable keys), `EUER_POSITION_DEFINITIONS` (side, assignable, small business target), `positionForTaxStatus` |
+| `line-mapping.ts`        | `EUER_LINE_MAPPINGS` (year → position → line + official label), `describePosition(position, year)`, `hasLineMapping(year)`    |
+| `category-position.ts`   | `validateCategoryPosition({ type, euerPosition, reducesIncome })` for the category service (#15)                              |
+| `calculate-euer.ts`      | `calculateEuer({ year, smallBusiness, groups, categories })` – the EÜR calculation (#25), pure                                |
+| `euer-service.ts`        | `createEuerService({ unitOfWork })` with `calculate(year)`: status, categories and sums in one unit of work                   |
+| `report-order.ts`        | `incomeInReportOrder(result)`: income lines in form order, line 13 after line 12 (view #26, export #27)                       |
+| `euer-csv.ts`            | `euerToCsv(result, labels)` – CSV of the EÜR (#27, see docs/architecture.md)                                                  |
+| `euer-export-service.ts` | `createEuerExportService({ euer, fileSaver })` with `exportCsv(…)`: calculate, save dialog, write                             |
 
-- **Stabile Schlüssel.** Kategorien speichern nur den Schlüssel. Schlüssel
-  werden nie umbenannt oder entfernt (sie stehen in der DB); neue Positionen
-  sind einfach neue Schlüssel.
-- **Zeilen pro Jahr.** `describePosition("TELEKOMMUNIKATION", 2025)` liefert
+- **Stable keys.** Categories store only the key. Keys are never renamed or
+  removed (they are in the DB); new positions are simply new keys.
+- **Lines per year.** `describePosition("TELEKOMMUNIKATION", 2025)` returns
   `{ position, line: 43, label: "Aufwendungen für Telekommunikation (z. B. Telefon, Internet)" }`.
-  Fehlt das Mapping für das Jahr oder die Position, kommt nur `{ position }`
-  zurück; die UI zeigt dann den Anzeigenamen der Position.
-- **Quelle 2025:** amtlicher Vordruck Anlage EÜR 2025 (2025AnlEÜR801–803,
-  „August 2025“) und „Anleitung zur Anlage EÜR – August 2025 – Version
-  1.9.1.1“, bekanntgegeben mit BMF-Schreiben vom 29.08.2025, GZ IV C 6 -
+  If the mapping for the year or the position is missing, only `{ position }`
+  is returned; the UI then shows the position's display name.
+- **Source 2025:** official form Anlage EÜR 2025 (2025AnlEÜR801–803,
+  "August 2025") and "Anleitung zur Anlage EÜR – August 2025 – Version
+  1.9.1.1", published with the BMF letter of 29.08.2025, GZ IV C 6 -
   S 2142/00023/010/001 (BStBl I 2025 S. 1652):
   <https://www.bundesfinanzministerium.de/Content/DE/Downloads/BMF_Schreiben/Steuerarten/Einkommensteuer/2025-08-29-anlage-EUER-2025.pdf?__blob=publicationFile&v=3>.
-  Alle Zeilen im Mapping sind gegen den Vordruck geprüft.
-- **Quelle 2026:** amtlicher Vordruck Anlage EÜR 2026 (2026AnlEÜR801–803,
-  „August 2026“) und „Anleitung zur Anlage EÜR – August 2026 – Version
-  2.5.1.1“, bekanntgegeben mit BMF-Schreiben vom 01.09.2026, GZ IV C 6 -
+  All lines in the mapping are checked against the form.
+- **Source 2026:** official form Anlage EÜR 2026 (2026AnlEÜR801–803,
+  "August 2026") and "Anleitung zur Anlage EÜR – August 2026 – Version
+  2.5.1.1", published with the BMF letter of 01.09.2026, GZ IV C 6 -
   S 2142/00024/010/001:
   <https://www.bundesfinanzministerium.de/Content/DE/Downloads/BMF_Schreiben/Steuerarten/Einkommensteuer/2026-09-01-anlage-EUER-2026.pdf?__blob=publicationFile&v=2>.
-  Alle Zeilen geprüft. Gegenüber 2025 ist Zeile 27 („Bildung Rücklage
-  Tierbewertung bei Land- und Forstwirten“) neu: Die Einnahmenzeilen 12–18
-  bleiben, `WAREN` rückt von 27 auf 29, alle übrigen Ausgabenzeilen ab
-  Fremdleistungen um eins nach hinten. Die Bezeichnungen sind in beiden
-  Jahren gleich (`LABELS_2025_2026`).
-- **Bezeichnungen** sind Formulardaten (wie Zeilennummern), keine UI-Texte:
-  Sie stehen im Code statt in Paraglide. Reine Ausfüllhinweise im Vordruck
-  (Verweise auf andere Zeilen, 10-Tage-Regel) sind weggelassen; Klammern,
-  die den Inhalt beschreiben (Beispiele, „auch zurückgezahlte
-  Hilfen/Zuschüsse aufgrund der Corona-Pandemie“), bleiben. Die **Anzeigenamen** der Positionen (z. B. im
-  Kategorie-Formular, ohne Jahresbezug) sind UI-Texte:
-  `euer_position_<schlüssel>` in `messages/de.json`, abgebildet in
+  All lines checked. Compared to 2025, line 27 ("Bildung Rücklage
+  Tierbewertung bei Land- und Forstwirten") is new: income lines 12–18 stay,
+  `WAREN` moves from 27 to 29, all other expense lines from Fremdleistungen
+  on move down by one. The labels are the same in both years
+  (`LABELS_2025_2026`).
+- **Labels** are form data (like line numbers), not UI texts: they live in
+  code instead of Paraglide. Pure filling instructions in the form
+  (references to other lines, 10-day rule) are omitted; parentheses that
+  describe the content (examples, "auch zurückgezahlte Hilfen/Zuschüsse
+  aufgrund der Corona-Pandemie") stay. The **display names** of the
+  positions (e.g. in the category form, without a year) are UI texts:
+  `euer_position_<key>` in `messages/de.json`, mapped in
   `src/ui/euer/position-name.ts` (`euerPositionName`).
 
-### Positionen und Zeilen 2025/2026
+### Positions and lines 2025/2026
 
-| Position                                             | Seite    | Zeile 2025 | Zeile 2026 | Hinweis                                                             |
-| ---------------------------------------------------- | -------- | ---------- | ---------- | ------------------------------------------------------------------- |
-| `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER`                 | Einnahme | 12         | 12         | nur berechnet, nicht zuweisbar (s. u.)                              |
-| `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER_NICHT_STEUERBAR` | Einnahme | 13         | 13         | „davon“-Zeile, nur nachrichtlich (`informational`), nicht zuweisbar |
-| `BETRIEBSEINNAHMEN_UST_PFLICHTIG`                    | Einnahme | 15         | 15         | netto                                                               |
-| `BETRIEBSEINNAHMEN_UST_FREI`                         | Einnahme | 16         | 16         | steuerfrei, nicht steuerbar, 0 %, Reverse Charge (§ 13b UStG)       |
-| `UST_VEREINNAHMT`                                    | Einnahme | 17         | 17         | berechnet aus dem USt-Anteil der Einnahmen, nicht zuweisbar         |
-| `UST_ERSTATTUNG`                                     | Einnahme | 18         | 18         | Kategorie „USt-Erstattung“                                          |
-| `WAREN`                                              | Ausgabe  | 27         | 29         |                                                                     |
-| `FREMDLEISTUNGEN`                                    | Ausgabe  | 29         | 30         |                                                                     |
-| `GWG`                                                | Ausgabe  | 36         | 37         |                                                                     |
-| `MIETE_GESCHAEFTSRAEUME`                             | Ausgabe  | 39         | 40         |                                                                     |
-| `TELEKOMMUNIKATION`                                  | Ausgabe  | 43         | 44         |                                                                     |
-| `REISENEBENKOSTEN`                                   | Ausgabe  | 44         | 45         | Übernachtung, Reisenebenkosten                                      |
-| `FORTBILDUNG`                                        | Ausgabe  | 45         | 46         |                                                                     |
-| `RECHTS_STEUERBERATUNG`                              | Ausgabe  | 46         | 47         |                                                                     |
-| `MIETE_LEASING_BEWEGLICH`                            | Ausgabe  | 47         | 48         |                                                                     |
-| `BEITRAEGE_VERSICHERUNGEN`                           | Ausgabe  | 49         | 50         |                                                                     |
-| `EDV_KOSTEN`                                         | Ausgabe  | 50         | 51         |                                                                     |
-| `ARBEITSMITTEL`                                      | Ausgabe  | 51         | 52         | Bürobedarf, Porto, Fachliteratur                                    |
-| `WERBUNG`                                            | Ausgabe  | 54         | 55         |                                                                     |
-| `VORSTEUER`                                          | Ausgabe  | 57         | 58         | berechnet aus dem USt-Anteil der Ausgaben, nicht zuweisbar          |
-| `UST_AN_FA`                                          | Ausgabe  | 58         | 59         | Kategorie „USt-Vorauszahlung“                                       |
-| `SONSTIGE_AUSGABEN`                                  | Ausgabe  | 60         | 61         | übrige unbeschränkt abziehbare Betriebsausgaben                     |
-| `BEWIRTUNG`                                          | Ausgabe  | 63         | 64         | Spalten „nicht abziehbar“/„abziehbar“ (s. u.)                       |
-| `VERPFLEGUNGSMEHRAUFWAND`                            | Ausgabe  | 64         | 65         |                                                                     |
-| `FAHRTKOSTEN`                                        | Ausgabe  | 70         | 71         | sonstige tatsächliche Fahrtkosten (z. B. Bahn, Flug, ÖPNV)          |
-| `FAHRTKOSTEN_PRIVATFAHRZEUG`                         | Ausgabe  | 71         | 72         | Fahrzeug nicht im Betriebsvermögen (Nutzungseinlage)                |
+| Position                                             | Side    | Line 2025 | Line 2026 | Note                                                                  |
+| ---------------------------------------------------- | ------- | --------- | --------- | --------------------------------------------------------------------- |
+| `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER`                 | Income  | 12        | 12        | computed only, not assignable (see below)                             |
+| `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER_NICHT_STEUERBAR` | Income  | 13        | 13        | "of which" line, informational only (`informational`), not assignable |
+| `BETRIEBSEINNAHMEN_UST_PFLICHTIG`                    | Income  | 15        | 15        | net                                                                   |
+| `BETRIEBSEINNAHMEN_UST_FREI`                         | Income  | 16        | 16        | tax-exempt, not taxable, 0 %, reverse charge (§ 13b UStG)             |
+| `UST_VEREINNAHMT`                                    | Income  | 17        | 17        | computed from the VAT share of income, not assignable                 |
+| `UST_ERSTATTUNG`                                     | Income  | 18        | 18        | category "USt-Erstattung"                                             |
+| `WAREN`                                              | Expense | 27        | 29        |                                                                       |
+| `FREMDLEISTUNGEN`                                    | Expense | 29        | 30        |                                                                       |
+| `GWG`                                                | Expense | 36        | 37        |                                                                       |
+| `MIETE_GESCHAEFTSRAEUME`                             | Expense | 39        | 40        |                                                                       |
+| `TELEKOMMUNIKATION`                                  | Expense | 43        | 44        |                                                                       |
+| `REISENEBENKOSTEN`                                   | Expense | 44        | 45        | accommodation, incidental travel costs                                |
+| `FORTBILDUNG`                                        | Expense | 45        | 46        |                                                                       |
+| `RECHTS_STEUERBERATUNG`                              | Expense | 46        | 47        |                                                                       |
+| `MIETE_LEASING_BEWEGLICH`                            | Expense | 47        | 48        |                                                                       |
+| `BEITRAEGE_VERSICHERUNGEN`                           | Expense | 49        | 50        |                                                                       |
+| `EDV_KOSTEN`                                         | Expense | 50        | 51        |                                                                       |
+| `ARBEITSMITTEL`                                      | Expense | 51        | 52        | office supplies, postage, specialist literature                       |
+| `WERBUNG`                                            | Expense | 54        | 55        |                                                                       |
+| `VORSTEUER`                                          | Expense | 57        | 58        | computed from the VAT share of expenses, not assignable               |
+| `UST_AN_FA`                                          | Expense | 58        | 59        | category "USt-Vorauszahlung"                                          |
+| `SONSTIGE_AUSGABEN`                                  | Expense | 60        | 61        | other fully deductible business expenses                              |
+| `BEWIRTUNG`                                          | Expense | 63        | 64        | columns "not deductible"/"deductible" (see below)                     |
+| `VERPFLEGUNGSMEHRAUFWAND`                            | Expense | 64        | 65        |                                                                       |
+| `FAHRTKOSTEN`                                        | Expense | 70        | 71        | other actual travel costs (e.g. train, flight, public transport)      |
+| `FAHRTKOSTEN_PRIVATFAHRZEUG`                         | Expense | 71        | 72        | vehicle not in business assets (Nutzungseinlage)                      |
 
-### Kleinunternehmer
+### Small business (Kleinunternehmer)
 
-Kleinunternehmer tragen laut Anleitung 2025 (Zeile 12) ihre vollständigen
-Betriebseinnahmen ohne die Beträge der Zeilen 18–22 in Zeile 12 ein; die
-Zeilen 15–17 verwenden sie in der Regel nicht. Kategorien behalten deshalb
-ihre Position (`BETRIEBSEINNAHMEN_UST_PFLICHTIG`/`_UST_FREI`), und die
-EÜR-Berechnung (#25) bildet sie im Kleinunternehmer-Jahr mit
-`positionForTaxStatus(position, smallBusiness)` auf
-`BETRIEBSEINNAHMEN_KLEINUNTERNEHMER` ab. Ein Wechsel des Steuerstatus eines
-Jahres braucht so keine Änderung an Kategorien. `UST_ERSTATTUNG` und alle
-Ausgaben bleiben unverändert. `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER`,
-`BETRIEBSEINNAHMEN_KLEINUNTERNEHMER_NICHT_STEUERBAR`, `UST_VEREINNAHMT` und
-`VORSTEUER` sind **nicht zuweisbar** – sie entstehen nur in der Berechnung.
+According to the 2025 instructions (line 12), small businesses enter their
+full business income excluding the amounts of lines 18–22 in line 12; they
+usually do not use lines 15–17. Categories therefore keep their position
+(`BETRIEBSEINNAHMEN_UST_PFLICHTIG`/`_UST_FREI`), and the EÜR calculation
+(#25) maps them to `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER` in a small business
+year with `positionForTaxStatus(position, smallBusiness)`. Changing a year's
+tax status thus needs no change to categories. `UST_ERSTATTUNG` and all
+expenses stay unchanged. `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER`,
+`BETRIEBSEINNAHMEN_KLEINUNTERNEHMER_NICHT_STEUERBAR`, `UST_VEREINNAHMT` and
+`VORSTEUER` are **not assignable** – they only arise in the calculation.
 
-Zeile 13 („davon nicht steuerbare Umsätze sowie Umsätze nach § 19 Abs. 2 …“)
-ist eine nachrichtliche „davon“-Zeile: Ihr Betrag ist schon in Zeile 12
-enthalten und zählt nicht zur Summe der Betriebseinnahmen
-(`informational: true`).
+Line 13 ("davon nicht steuerbare Umsätze sowie Umsätze nach § 19 Abs. 2 …")
+is an informational "of which" line: its amount is already included in line
+12 and does not count towards total business income (`informational: true`).
 
-Schuldet ein Kleinunternehmer als Leistungsempfänger die USt nach § 13b UStG
-(z. B. für Werbeanzeigen oder Zahlungsgebühren ausländischer Anbieter), zahlt
-er sie an das Finanzamt: Diese Zahlungen gehören zu `UST_AN_FA` (Kategorie
-„USt-Vorauszahlung“); ein Vorsteuerabzug entfällt.
+If a small business owes VAT as the recipient of a service under § 13b UStG
+(e.g. for ads or payment fees from foreign providers), it pays it to the tax
+office: these payments belong to `UST_AN_FA` (category "USt-Vorauszahlung");
+there is no input tax deduction.
 
-### Erlösminderung (`reduces_income`)
+### Income reduction (`reduces_income`)
 
-Eine Erlösminderungs-Kategorie ist eine **Ausgabe**-Kategorie, deren
-`euer_position` die **Einnahmen**-Position ist, die sie mindert (Standard:
-„Erlösminderung / Rückerstattung“ → `BETRIEBSEINNAHMEN_UST_PFLICHTIG`).
-`validateCategoryPosition` liefert dafür Fehlercodes:
+An income reduction category is an **expense** category whose
+`euer_position` is the **income** position it reduces (default:
+"Erlösminderung / Rückerstattung" → `BETRIEBSEINNAHMEN_UST_PFLICHTIG`).
+`validateCategoryPosition` returns these error codes:
 
-| Fall                                   | Erlaubte Position                                                                | Fehlercode sonst                           |
-| -------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------ |
-| jede Kategorie                         | bekannt und zuweisbar                                                            | `unknownPosition`, `positionNotAssignable` |
-| Einnahme-Kategorie                     | Einnahmen-Position                                                               | `positionKindMismatch`                     |
-| Ausgabe-Kategorie                      | Ausgaben-Position                                                                | `positionKindMismatch`                     |
-| Ausgabe-Kategorie mit `reducesIncome`  | Einnahmen-Position                                                               | `reducesIncomeNeedsIncomePosition`         |
-| Ausgabe-Kategorie mit `reducesIncome`  | Umsatz-Position (15/16, mit Kleinunternehmer-Ziel), nicht z. B. `UST_ERSTATTUNG` | `reducesIncomeNeedsTurnoverPosition`       |
-| Einnahme-Kategorie mit `reducesIncome` | –                                                                                | `reducesIncomeNotExpense` (DB: CHECK)      |
+| Case                                  | Allowed position                                                                 | Error code otherwise                       |
+| ------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------ |
+| every category                        | known and assignable                                                             | `unknownPosition`, `positionNotAssignable` |
+| income category                       | income position                                                                  | `positionKindMismatch`                     |
+| expense category                      | expense position                                                                 | `positionKindMismatch`                     |
+| expense category with `reducesIncome` | income position                                                                  | `reducesIncomeNeedsIncomePosition`         |
+| expense category with `reducesIncome` | turnover position (15/16, with small business target), not e.g. `UST_ERSTATTUNG` | `reducesIncomeNeedsTurnoverPosition`       |
+| income category with `reducesIncome`  | –                                                                                | `reducesIncomeNotExpense` (DB: CHECK)      |
 
-Die EÜR-Berechnung (#25) zieht die Beträge solcher Buchungen von ihrer
-Position ab, statt sie als Ausgabe zu zählen (im Kleinunternehmer-Jahr nach
-`positionForTaxStatus`, also von Zeile 12); der USt-Anteil einer
-regelbesteuerten Rückerstattung mindert `UST_VEREINNAHMT` (Berichtigung der
-geschuldeten USt), nicht `VORSTEUER` – siehe
-[EÜR-Berechnung](#eür-berechnung-25).
+The EÜR calculation (#25) subtracts the amounts of such bookings from their
+position instead of counting them as an expense (in a small business year
+after `positionForTaxStatus`, i.e. from line 12); the VAT share of a refund
+in a regularly taxed year reduces `UST_VEREINNAHMT` (correction of the VAT
+owed), not `VORSTEUER` – see [EÜR calculation](#eür-calculation-25).
 
-### Standardkategorien (Migration `0001_default_categories`)
+### Default categories (migration `0001_default_categories`)
 
-| Art      | Name                                               | Position                          | System |
-| -------- | -------------------------------------------------- | --------------------------------- | ------ |
-| Einnahme | Umsatzerlöse                                       | `BETRIEBSEINNAHMEN_UST_PFLICHTIG` |        |
-| Einnahme | Steuerfreie / nicht steuerbare Erlöse              | `BETRIEBSEINNAHMEN_UST_FREI`      |        |
-| Einnahme | USt-Erstattung                                     | `UST_ERSTATTUNG`                  | ja     |
-| Ausgabe  | Fremdleistungen                                    | `FREMDLEISTUNGEN`                 |        |
-| Ausgabe  | Geringwertige Wirtschaftsgüter (GWG)               | `GWG`                             |        |
-| Ausgabe  | Miete Geschäftsräume                               | `MIETE_GESCHAEFTSRAEUME`          |        |
-| Ausgabe  | Telefon / Internet                                 | `TELEKOMMUNIKATION`               |        |
-| Ausgabe  | Übernachtung / Reisenebenkosten                    | `REISENEBENKOSTEN`                |        |
-| Ausgabe  | Verpflegungsmehraufwand                            | `VERPFLEGUNGSMEHRAUFWAND`         |        |
-| Ausgabe  | Fahrtkosten                                        | `FAHRTKOSTEN`                     |        |
-| Ausgabe  | Fortbildung                                        | `FORTBILDUNG`                     |        |
-| Ausgabe  | Rechts- und Steuerberatung, Buchführung            | `RECHTS_STEUERBERATUNG`           |        |
-| Ausgabe  | Beiträge / Versicherungen                          | `BEITRAEGE_VERSICHERUNGEN`        |        |
-| Ausgabe  | EDV-Kosten / Software                              | `EDV_KOSTEN`                      |        |
-| Ausgabe  | Bürobedarf / Porto / Fachliteratur                 | `ARBEITSMITTEL`                   |        |
-| Ausgabe  | Werbung                                            | `WERBUNG`                         |        |
-| Ausgabe  | Bewirtung                                          | `BEWIRTUNG`                       |        |
-| Ausgabe  | Bank- und Zahlungsgebühren                         | `SONSTIGE_AUSGABEN`               |        |
-| Ausgabe  | Sonstige Betriebsausgaben                          | `SONSTIGE_AUSGABEN`               |        |
-| Ausgabe  | USt-Vorauszahlung                                  | `UST_AN_FA`                       | ja     |
-| Ausgabe  | Erlösminderung / Rückerstattung (`reduces_income`) | `BETRIEBSEINNAHMEN_UST_PFLICHTIG` | ja     |
+| Type    | Name                                               | Position                          | System |
+| ------- | -------------------------------------------------- | --------------------------------- | ------ |
+| Income  | Umsatzerlöse                                       | `BETRIEBSEINNAHMEN_UST_PFLICHTIG` |        |
+| Income  | Steuerfreie / nicht steuerbare Erlöse              | `BETRIEBSEINNAHMEN_UST_FREI`      |        |
+| Income  | USt-Erstattung                                     | `UST_ERSTATTUNG`                  | yes    |
+| Expense | Fremdleistungen                                    | `FREMDLEISTUNGEN`                 |        |
+| Expense | Geringwertige Wirtschaftsgüter (GWG)               | `GWG`                             |        |
+| Expense | Miete Geschäftsräume                               | `MIETE_GESCHAEFTSRAEUME`          |        |
+| Expense | Telefon / Internet                                 | `TELEKOMMUNIKATION`               |        |
+| Expense | Übernachtung / Reisenebenkosten                    | `REISENEBENKOSTEN`                |        |
+| Expense | Verpflegungsmehraufwand                            | `VERPFLEGUNGSMEHRAUFWAND`         |        |
+| Expense | Fahrtkosten                                        | `FAHRTKOSTEN`                     |        |
+| Expense | Fortbildung                                        | `FORTBILDUNG`                     |        |
+| Expense | Rechts- und Steuerberatung, Buchführung            | `RECHTS_STEUERBERATUNG`           |        |
+| Expense | Beiträge / Versicherungen                          | `BEITRAEGE_VERSICHERUNGEN`        |        |
+| Expense | EDV-Kosten / Software                              | `EDV_KOSTEN`                      |        |
+| Expense | Bürobedarf / Porto / Fachliteratur                 | `ARBEITSMITTEL`                   |        |
+| Expense | Werbung                                            | `WERBUNG`                         |        |
+| Expense | Bewirtung                                          | `BEWIRTUNG`                       |        |
+| Expense | Bank- und Zahlungsgebühren                         | `SONSTIGE_AUSGABEN`               |        |
+| Expense | Sonstige Betriebsausgaben                          | `SONSTIGE_AUSGABEN`               |        |
+| Expense | USt-Vorauszahlung                                  | `UST_AN_FA`                       | yes    |
+| Expense | Erlösminderung / Rückerstattung (`reduces_income`) | `BETRIEBSEINNAHMEN_UST_PFLICHTIG` | yes    |
 
-- `is_system = 1` nur für die Kategorien, auf die sich die EÜR verlässt
-  (USt an das bzw. vom Finanzamt, Erlösminderung). Der Kategorien-Service
-  (#15) erlaubt bei ihnen nur das Umbenennen: nicht archivieren, nicht
-  löschen, Position und „mindert Einnahmen“ fest
-  ([Architektur](architecture.md#kategorien-service-15)). Die übrigen sind
-  normale, änderbare Vorschläge.
-- Die Migration läuft wie jede Migration genau einmal. Löscht oder benennt
-  der Nutzer eine Standardkategorie um, kommt sie nicht wieder.
-- Tests, die eine leere Kategorientabelle brauchen (z. B. der
-  Repository-Vertrag), nutzen `createTestDb({ defaultCategories: false })`.
-  `src/persistence/default-categories.test.ts` prüft die Seed-Daten und dass
-  jede Position laut `validateCategoryPosition` gültig ist.
+- `is_system = 1` only for the categories the EÜR relies on (VAT to/from the
+  tax office, income reduction). The category service (#15) only allows
+  renaming them: no archiving, no deleting, position and "reduces income"
+  fixed ([Architecture](architecture.md#category-service-15)). The others are
+  regular, editable suggestions.
+- Like every migration, it runs exactly once. If the user deletes or renames
+  a default category, it does not come back.
+- Tests that need an empty category table (e.g. the repository contract) use
+  `createTestDb({ defaultCategories: false })`.
+  `src/persistence/default-categories.test.ts` checks the seed data and that
+  every position is valid according to `validateCategoryPosition`.
 
-### Neues Steuerjahr ergänzen
+### Adding a new tax year
 
-1. Amtlichen Vordruck und Anleitung der Anlage EÜR des Jahres beschaffen
-   (BMF-Schreiben „Standardisierte Einnahmenüberschussrechnung nach § 60
-   Absatz 4 EStDV; Anlage EÜR <Jahr>“, bundesfinanzministerium.de).
-2. In `line-mapping.ts` eine Konstante `ANLAGE_EUER_<JAHR>` anlegen (Quelle
-   samt Datum, GZ und Version im Kommentar), jede Position gegen den Vordruck
-   prüfen und in `EUER_LINE_MAPPINGS` eintragen (ein vorläufiges Jahr darf
-   auf das Vorjahr zeigen). Nicht prüfbare Zeilen weglassen – dann greift
-   der Fallback.
-3. Die Zeilen des Jahres in `line-mapping.test.ts` festhalten.
-4. Ändert sich die Fachlogik (z. B. eine Zeile wird geteilt), eine neue
-   Position anlegen; alte Schlüssel bleiben.
+1. Get the official form and instructions of the Anlage EÜR for the year
+   (BMF letter "Standardisierte Einnahmenüberschussrechnung nach § 60
+   Absatz 4 EStDV; Anlage EÜR <Jahr>", bundesfinanzministerium.de).
+2. Add a constant `ANLAGE_EUER_<YEAR>` in `line-mapping.ts` (source with
+   date, GZ and version in the comment), check every position against the
+   form and add it to `EUER_LINE_MAPPINGS` (a provisional year may point to
+   the previous year). Leave out lines that cannot be verified – the fallback
+   then applies.
+3. Pin the year's lines in `line-mapping.test.ts`.
+4. If the domain logic changes (e.g. a line is split), add a new position;
+   old keys stay.
 
-## EÜR-Berechnung (#25)
+## EÜR calculation (#25)
 
-`calculateEuer` (`src/business/euer/calculate-euer.ts`) ist eine reine
-Funktion; `EuerService.calculate(year)` (`services.euer`) lädt in **einer**
-Unit of Work den Steuerstatus (`TaxYearRepository.find`, ohne Datensatz
-regelbesteuert), alle Kategorien (inkl. archivierter) und die Summen des
-Jahres aus `BookingRepository.sumByCategoryAndVatRate(year)` – eine
-Aggregat-Abfrage über den Datumsbereich des Jahres (Zahlungsdatum),
-gruppiert nach Kategorie, Art und USt-Satz (Anzahl, Brutto, Netto, USt).
-Ein ungültiges Jahr liefert ohne Datenbankzugriff
+`calculateEuer` (`src/business/euer/calculate-euer.ts`) is a pure function;
+`EuerService.calculate(year)` (`services.euer`) loads in **one** unit of work
+the tax status (`TaxYearRepository.find`, regularly taxed without a record),
+all categories (including archived ones) and the year's sums from
+`BookingRepository.sumByCategoryAndVatRate(year)` – an aggregate query over
+the year's date range (payment date), grouped by category, type and VAT rate
+(count, gross, net, VAT). An invalid year returns, without database access,
 `{ ok: false, reason: "invalid", errors: [{ field: "year", code: "invalidYear" }] }`.
 
-### Regeln
+### Rules
 
-| Fall                                 | Regelbesteuert                                                             | Kleinunternehmer                            |
-| ------------------------------------ | -------------------------------------------------------------------------- | ------------------------------------------- |
-| Betrag in der Position der Kategorie | Netto                                                                      | Brutto                                      |
-| USt-Anteil (nur Satz `7`/`19`)       | Einnahme → `UST_VEREINNAHMT`, Ausgabe → `VORSTEUER`                        | keine USt-Positionen                        |
-| Umsatz-Kategorie (Zeile 15/16)       | Satz `7`/`19` → 15, Satz `0`/`reverse_charge`/kein Satz → 16               | → `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER` (12) |
-| Zeile 13 (nachrichtlich)             | –                                                                          | Beträge der Kategorien mit `_UST_FREI`      |
-| Erlösminderung (`reducesIncome`)     | Netto mindert 15 bzw. 16 (nach Satz), USt-Anteil mindert `UST_VEREINNAHMT` | Brutto mindert 12 (bei `_UST_FREI` auch 13) |
-| `UST_ERSTATTUNG`, `UST_AN_FA`        | **Brutto** in Zeile 18 bzw. 58/59, nie USt-Zeilen (auch bei Satz 7/19)     | Brutto, unverändert                         |
-| `BEWIRTUNG`                          | Netto, davon zählen 70 %; Vorsteuer voll                                   | Brutto, davon zählen 70 %                   |
-| übrige Ausgaben                      | Netto in die Position                                                      | Brutto in die Position                      |
+| Case                               | Regularly taxed                                                      | Small business                              |
+| ---------------------------------- | -------------------------------------------------------------------- | ------------------------------------------- |
+| Amount in the category's position  | Net                                                                  | Gross                                       |
+| VAT share (rate `7`/`19` only)     | income → `UST_VEREINNAHMT`, expense → `VORSTEUER`                    | no VAT positions                            |
+| Turnover category (line 15/16)     | rate `7`/`19` → 15, rate `0`/`reverse_charge`/no rate → 16           | → `BETRIEBSEINNAHMEN_KLEINUNTERNEHMER` (12) |
+| Line 13 (informational)            | –                                                                    | amounts of the categories with `_UST_FREI`  |
+| Income reduction (`reducesIncome`) | net reduces 15 or 16 (by rate), VAT share reduces `UST_VEREINNAHMT`  | gross reduces 12 (with `_UST_FREI` also 13) |
+| `UST_ERSTATTUNG`, `UST_AN_FA`      | **gross** in line 18 or 58/59, never VAT lines (even with rate 7/19) | gross, unchanged                            |
+| `BEWIRTUNG`                        | net, 70 % of it counts; input tax in full                            | gross, 70 % of it counts                    |
+| other expenses                     | net into the position                                                | gross into the position                     |
 
-Entscheidungen (die früher offenen Punkte):
+Decisions (the formerly open points):
 
-- **Status des Jahres, nicht der Satz der Buchung.** Im
-  Kleinunternehmer-Jahr zählt immer der Bruttobetrag; ein gespeicherter Satz
-  wird ignoriert (keine USt-Positionen, Satz `0` führt auch nicht zu Zeile
-  13). Im regelbesteuerten Jahr zählt eine Buchung ohne Satz mit Netto =
-  Brutto und USt 0 (so ist sie gespeichert); eine Einnahme ohne Satz geht wie
-  Satz `0` nach Zeile 16. Unpassende Buchungen (#16) meldet das Ergebnis als
-  Hinweis `vatRateInSmallBusinessYear` bzw. `vatRateMissingInRegularYear`
-  mit Anzahl.
-- **Zeile 15 oder 16 nach Satz.** Bei Umsatz-Kategorien (Positionen mit
-  Kleinunternehmer-Ziel: `BETRIEBSEINNAHMEN_UST_PFLICHTIG`/`_UST_FREI`)
-  entscheidet im regelbesteuerten Jahr der Satz der Buchung, und zwar in
-  **beide** Richtungen: `0`, Reverse Charge oder kein Satz → 16, `7`/`19` →
-  15 – auch eine Einnahme mit 19 % in „Steuerfreie / nicht steuerbare
-  Erlöse“ ist steuerpflichtig, Zeile 16 wäre falsch. Erlösminderungen
-  ebenso. `UST_ERSTATTUNG` bleibt in Zeile 18.
-- **Zahlungen an das / Erstattungen vom Finanzamt** (`UST_AN_FA`,
-  `UST_ERSTATTUNG`, in `EUER_POSITION_DEFINITIONS` als `taxOfficePayment`
-  markiert, `isTaxOfficePayment`) enthalten keine USt: Laut Anleitung
-  gehören die vollen gezahlten bzw. erstatteten Beträge in Zeile 18 bzw.
-  58/59. Die Berechnung zählt deshalb immer den **Bruttobetrag** in der
-  Position und nie einen USt-Anteil – auch wenn die Buchung (versehentlich,
-  das Formular startet mit 19 %) Satz `7`/`19` hat; dann Hinweis
-  `vatRateOnTaxPayment` mit Anzahl (nur regelbesteuert; im
-  Kleinunternehmer-Jahr greift schon `vatRateInSmallBusinessYear`). Das
-  Buchungsformular setzt bei Auswahl einer solchen Kategorie den Satz auf
-  `0` und zeigt einen Hinweis; der Buchungs-Service prüft unverändert.
-- **Kategorien nur über Position und Flag**, zum Berechnungszeitpunkt
-  (Änderungen wirken rückwirkend, #15), nie über den Namen. Archivierte
-  Kategorien zählen normal.
-- **Erlösminderung:** Der USt-Anteil einer regelbesteuerten Rückerstattung
-  mindert `UST_VEREINNAHMT` (Berichtigung der geschuldeten USt, § 17 UStG),
-  nicht `VORSTEUER`.
-- **Negative Zeilen** (Erlösminderung größer als die Einnahmen der Zeile)
-  bleiben negativ und zählen so in die Summen; Hinweis `negativeLine` mit
-  der Position. Typischer Fall: Rückerstattungen von Umsätzen eines
-  Vorjahres übersteigen die Umsätze der Zeile in diesem Jahr (Zahlungsdatum
-  entscheidet). Das ist zulässig – die Anlage EÜR nimmt negative Beträge
-  (mit Minus) auf. Formulierung für #26 etwa: „Zeile X ist negativ, weil
-  Erstattungen die Einnahmen dieser Zeile übersteigen (z. B. Rückzahlungen
-  für Umsätze aus Vorjahren). Bitte Zuordnung prüfen.“
-- **Zeile 13** (Kleinunternehmer) ergibt sich vor der Umleitung aus den
-  Beträgen der Kategorien mit `BETRIEBSEINNAHMEN_UST_FREI` (inkl. deren
-  Erlösminderungen); nur nachrichtlich (`informational`, nicht in der
-  Summe, schon in Zeile 12 enthalten). Das ist eine Näherung: Zeile 16
-  umfasst auch steuerfreie Umsätze nach § 4 UStG, die nicht unter § 19
-  Abs. 2 Satz 1 Nr. 1 und 2 UStG fallen.
-- **Bewirtung (Zeile 63, 2026: 64)** hat die Spalten „nicht abziehbar“ und
-  „abziehbar“ (§ 4 Abs. 5 Satz 1 Nr. 2 EStG). Die Zeile trägt
-  `entertainment: { totalCents, deductibleCents, nonDeductibleCents }`:
-  30 % sind nicht abziehbar, **einmal** auf die Jahressumme kaufmännisch
-  gerundet (`splitEntertainment`), der abziehbare Teil ist der Rest. Nur der
-  abziehbare Teil ist der Betrag der Zeile (`amountCents`) und zählt in
-  Ausgaben und Gewinn; der nicht abziehbare Teil steht nur in seiner Spalte.
-  Die Vorsteuer auf Bewirtung zählt voll in `VORSTEUER` (die 70-%-Grenze
-  gilt nur einkommensteuerlich). Hinweis `entertainmentSplit`. Grenzen: Die
-  App prüft weder Angemessenheit noch Nachweis; voll abziehbare Bewirtung
-  (z. B. reine Arbeitnehmerbewirtung) gehört in eine andere Kategorie.
-- **Verpflegungsmehraufwand (Zeile 64, 2026: 65)** ist nur in Höhe der
-  Pauschalen abziehbar. Die App kennt weder Reisetage noch Pauschalen und
-  zählt die Beträge wie erfasst – Nutzer sollten die Pauschale als Betrag
-  buchen. Hinweis `mealAllowanceFlatRates`.
-- **§ 13b UStG als Leistungsempfänger:** Die an das Finanzamt gezahlte USt
-  läuft über die Kategorie mit `UST_AN_FA` (Ausgabe). Die Eingangsleistung
-  selbst hat Satz `reverse_charge` (Netto = Brutto, keine Vorsteuer). Im
-  Kleinunternehmer-Jahr ist das korrekt (kein Vorsteuerabzug). Im
-  regelbesteuerten Jahr verrechnet die Voranmeldung geschuldete USt und
-  Vorsteuer aus § 13b; die App bildet beides nicht als eigene Beträge ab
-  (Wirkung auf den Gewinn: null).
-- **Nicht zuordenbare Buchungen** (Kategorie fehlt, Art der Kategorie passt
-  nicht zur Buchung, Position unbekannt oder laut
-  `validateCategoryPosition` ungültig – z. B. ein Schlüssel einer neueren
-  App-Version) zählen **nicht**; Hinweis `unassignableBookings` mit Anzahl
-  und Kategorie-IDs. Über die Services entstehen solche Daten nicht.
+- **Status of the year, not the booking's rate.** In a small business year
+  the gross amount always counts; a stored rate is ignored (no VAT
+  positions, rate `0` does not lead to line 13 either). In a regularly taxed
+  year a booking without a rate counts with net = gross and VAT 0 (that is
+  how it is stored); income without a rate goes to line 16 like rate `0`.
+  The result reports mismatching bookings (#16) as warnings
+  `vatRateInSmallBusinessYear` or `vatRateMissingInRegularYear` with a count.
+- **Line 15 or 16 by rate.** For turnover categories (positions with a small
+  business target: `BETRIEBSEINNAHMEN_UST_PFLICHTIG`/`_UST_FREI`), in a
+  regularly taxed year the booking's rate decides, in **both** directions:
+  `0`, reverse charge or no rate → 16, `7`/`19` → 15 – even income at 19 % in
+  "Steuerfreie / nicht steuerbare Erlöse" is taxable, line 16 would be
+  wrong. Income reductions likewise. `UST_ERSTATTUNG` stays in line 18.
+- **Payments to / refunds from the tax office** (`UST_AN_FA`,
+  `UST_ERSTATTUNG`, marked as `taxOfficePayment` in
+  `EUER_POSITION_DEFINITIONS`, `isTaxOfficePayment`) contain no VAT: per the
+  instructions, the full amounts paid or refunded go into line 18 or 58/59.
+  The calculation therefore always counts the **gross amount** in the
+  position and never a VAT share – even if the booking (by mistake, the form
+  starts with 19 %) has rate `7`/`19`; then warning `vatRateOnTaxPayment`
+  with a count (regularly taxed only; in a small business year
+  `vatRateInSmallBusinessYear` already applies). When such a category is
+  selected, the booking form sets the rate to `0` and shows a hint; the
+  booking service validates as before.
+- **Categories only via position and flag**, at calculation time (changes
+  apply retroactively, #15), never via the name. Archived categories count
+  normally.
+- **Income reduction:** the VAT share of a refund in a regularly taxed year
+  reduces `UST_VEREINNAHMT` (correction of the VAT owed, § 17 UStG), not
+  `VORSTEUER`.
+- **Negative lines** (income reduction larger than the line's income) stay
+  negative and count that way in the totals; warning `negativeLine` with the
+  position. Typical case: refunds of a previous year's sales exceed the
+  line's sales this year (the payment date decides). That is permitted – the
+  Anlage EÜR accepts negative amounts (with a minus). Wording for #26, for
+  example: "Line X is negative because refunds exceed this line's income
+  (e.g. repayments for sales from previous years). Please check the
+  assignment."
+- **Line 13** (small business) is derived before the redirection from the
+  amounts of the categories with `BETRIEBSEINNAHMEN_UST_FREI` (including
+  their income reductions); informational only (`informational`, not in the
+  total, already included in line 12). This is an approximation: line 16
+  also covers tax-exempt sales under § 4 UStG that do not fall under § 19
+  Abs. 2 Satz 1 Nr. 1 and 2 UStG.
+- **Entertainment (Bewirtung, line 63, 2026: 64)** has the columns "not
+  deductible" and "deductible" (§ 4 Abs. 5 Satz 1 Nr. 2 EStG). The line
+  carries `entertainment: { totalCents, deductibleCents, nonDeductibleCents }`:
+  30 % is not deductible, rounded half-up **once** on the annual total
+  (`splitEntertainment`), the deductible part is the remainder. Only the
+  deductible part is the line's amount (`amountCents`) and counts towards
+  expenses and profit; the non-deductible part only appears in its column.
+  Input tax on entertainment counts in full in `VORSTEUER` (the 70 % limit
+  only applies to income tax). Warning `entertainmentSplit`. Limits: the app
+  checks neither appropriateness nor documentation; fully deductible
+  entertainment (e.g. employees only) belongs in another category.
+- **Additional meal expenses (Verpflegungsmehraufwand, line 64, 2026: 65)**
+  are deductible only up to the flat rates. The app knows neither travel
+  days nor flat rates and counts the amounts as recorded – users should book
+  the flat rate as the amount. Warning `mealAllowanceFlatRates`.
+- **§ 13b UStG as service recipient:** the VAT paid to the tax office goes
+  through the category with `UST_AN_FA` (expense). The incoming service
+  itself has rate `reverse_charge` (net = gross, no input tax). In a small
+  business year that is correct (no input tax deduction). In a regularly
+  taxed year the VAT return offsets VAT owed and input tax under § 13b; the
+  app does not model either as separate amounts (effect on profit: zero).
+- **Unassignable bookings** (category missing, category type does not match
+  the booking, position unknown or invalid according to
+  `validateCategoryPosition` – e.g. a key from a newer app version) do
+  **not** count; warning `unassignableBookings` with count and category IDs.
+  Such data does not arise through the services.
 
-### Beträge
+### Amounts
 
-- Integer-Cent. Summiert werden die **gespeicherten** Netto- und
-  USt-Beträge je Buchung (`sum(net_cents)`, `sum(vat_cents)`), nie aus
-  Bruttosummen neu berechnet: Dreimal 0,10 € zu 19 % sind 0,24 € netto und
-  0,06 € USt, nicht 0,25 € und 0,05 €. `MAX_AMOUNT_CENTS` hält alle Summen
-  exakt.
-- Gewinn = Einnahmen − Ausgaben (ohne nachrichtliche Zeilen); negativ =
-  Verlust.
+- Integer cents. The **stored** net and VAT amounts per booking are summed
+  (`sum(net_cents)`, `sum(vat_cents)`), never recomputed from gross sums:
+  three times 0.10 € at 19 % is 0.24 € net and 0.06 € VAT, not 0.25 € and
+  0.05 €. `MAX_AMOUNT_CENTS` keeps all sums exact.
+- Profit = income − expenses (without informational lines); negative =
+  loss.
 
-### Ergebnis (`EuerResult`)
+### Result (`EuerResult`)
 
 ```ts
 {
   year, smallBusiness,
-  hasLineMapping,                  // false → UI zeigt Positionsnamen (#26)
-  income: EuerReportLine[],        // nach Zeile; ohne Mapping in Positionsreihenfolge
+  hasLineMapping,                  // false → UI shows position names (#26)
+  income: EuerReportLine[],        // by line; without mapping in position order
   expenses: EuerReportLine[],
-  informational: EuerReportLine[], // Zeile 13, nicht in den Summen
+  informational: EuerReportLine[], // line 13, not in the totals
   totals: { incomeCents, expenseCents, profitCents },
-  warnings: EuerWarning[],         // Codes in fester Reihenfolge (s. EuerWarning)
+  warnings: EuerWarning[],         // codes in fixed order (see EuerWarning)
 }
 EuerReportLine = {
-  position, line?, label?,         // line/label nur mit Mapping (describePosition)
-  amountCents,                     // zählt so in die Summe (Bewirtung: abziehbarer Teil)
+  position, line?, label?,         // line/label only with mapping (describePosition)
+  amountCents,                     // counts like this in the total (entertainment: deductible part)
   bookingCount,
-  entertainment?,                  // nur BEWIRTUNG
+  entertainment?,                  // BEWIRTUNG only
   contributions: { categoryId, bookingType, vatRates, bookingCount, amountCents }[],
 }
 ```
 
-- **Welche Zeilen:** jede Position, zu der mindestens eine Buchung beiträgt
-  – auch mit Summe 0 (z. B. Umsatz und volle Erstattung). Positionen ohne
-  Buchungen fehlen. USt-Zeilen entstehen aus Buchungen mit Satz `7`/`19`.
-- **Drill-down (#26):** `contributions` nennt je Kategorie und Buchungsart
-  die beitragenden USt-Sätze, die Anzahl und den (vorzeichenbehafteten)
-  Betrag; die Beiträge ergeben die Summe der Zeile (Bewirtung:
-  `entertainment.totalCents`). Die Buchungen einer Zeile sind genau: Jahr +
-  `categoryId` + `bookingType` + `vatRates` je Beitrag. Die Buchungssuche
-  filtert dafür seit #26 auch nach USt-Satz (`vatRates`, URL `vat`); die
-  Ansicht verlinkt die Vereinigung aus Kategorien und Sätzen – warum das
-  genau ist: [Architektur](architecture.md#eür-jahresansicht-26).
+- **Which lines:** every position that at least one booking contributes to
+  – even with a total of 0 (e.g. a sale and a full refund). Positions
+  without bookings are missing. VAT lines arise from bookings with rate
+  `7`/`19`.
+- **Drill-down (#26):** `contributions` lists, per category and booking
+  type, the contributing VAT rates, the count and the (signed) amount; the
+  contributions add up to the line's total (entertainment:
+  `entertainment.totalCents`). The bookings of a line are exactly: year +
+  `categoryId` + `bookingType` + `vatRates` per contribution. Since #26 the
+  booking search also filters by VAT rate (`vatRates`, URL `vat`); the view
+  links the union of categories and rates – why that is exact:
+  [Architecture](architecture.md#eür-annual-view-26).
 
-## Migrationen
+## Migrations
 
 ```
 src/persistence/migrations/
-  0000_init.sql            ← SQL, Anweisungen getrennt durch "--> statement-breakpoint"
-  meta/_journal.json       ← Reihenfolge: entries[].idx / .tag (= Dateiname ohne .sql) / .when
-  meta/0000_snapshot.json  ← Schema-Stand für den nächsten Diff (nur drizzle-kit)
+  0000_init.sql            ← SQL, statements separated by "--> statement-breakpoint"
+  meta/_journal.json       ← order: entries[].idx / .tag (= file name without .sql) / .when
+  meta/0000_snapshot.json  ← schema state for the next diff (drizzle-kit only)
 ```
 
-- Schema ändern → `pnpm db:generate` (optional `--name <name>`) → erzeugte
-  Dateien committen. Migrationen werden nie nachträglich geändert.
-- Reine Datenmigrationen (z. B. Standardkategorien, #13) entstehen mit
-  `pnpm db:generate --custom --name <name>`: drizzle-kit legt eine leere
-  SQL-Datei samt Journal-Eintrag an, die man selbst füllt.
-- CI prüft, dass Schema und Migrationen zusammenpassen: Nach
-  `pnpm db:generate` darf sich nichts ändern.
-- Die Dateien sind generiert und von oxfmt ausgenommen.
+- Change the schema → `pnpm db:generate` (optionally `--name <name>`) →
+  commit the generated files. Migrations are never changed afterwards.
+- Pure data migrations (e.g. default categories, #13) are created with
+  `pnpm db:generate --custom --name <name>`: drizzle-kit creates an empty SQL
+  file with a journal entry, which you fill yourself.
+- CI checks that schema and migrations match: nothing may change after
+  `pnpm db:generate`.
+- The files are generated and excluded from oxfmt.
 
-## Datenbank zur Laufzeit (#10)
+## Database at runtime (#10)
 
-| Datei                                            | Aufgabe                                                           |
-| ------------------------------------------------ | ----------------------------------------------------------------- |
-| `src-tauri/src/lib.rs`                           | Pool mit genau einer Verbindung, beim Plugin registriert          |
-| `src/persistence/tauri-sql-client.ts`            | `SqlClient` über `tauri-plugin-sql` (`Database.get`)              |
-| `src/persistence/connection.ts`                  | `SqlConnection`: serialisiert Zugriffe, `exclusive`/`transaction` |
-| `src/persistence/drizzle-proxy.ts`               | Callback für Drizzles `sqlite-proxy`                              |
-| `src/persistence/database.ts`                    | `Database` = `{ db, transaction }`, Basis der Repositories        |
-| `src/persistence/bundled-migrations.ts`          | Migrationen, von Vite gebündelt                                   |
-| `src/persistence/migrator.ts`                    | eigener Migrator                                                  |
-| `src/persistence/open-database.ts`               | `openDatabase(client)`: migrieren, `Database` erzeugen            |
-| `src/app/startup.ts`, `src/app/app-services.tsx` | Start, Lade-/Fehlerbildschirm, Services per Context               |
+| File                                             | Responsibility                                                |
+| ------------------------------------------------ | ------------------------------------------------------------- |
+| `src-tauri/src/lib.rs`                           | Pool with exactly one connection, registered with the plugin  |
+| `src/persistence/tauri-sql-client.ts`            | `SqlClient` over `tauri-plugin-sql` (`Database.get`)          |
+| `src/persistence/connection.ts`                  | `SqlConnection`: serialises access, `exclusive`/`transaction` |
+| `src/persistence/drizzle-proxy.ts`               | Callback for Drizzle's `sqlite-proxy`                         |
+| `src/persistence/database.ts`                    | `Database` = `{ db, transaction }`, base of the repositories  |
+| `src/persistence/bundled-migrations.ts`          | Migrations, bundled by Vite                                   |
+| `src/persistence/migrator.ts`                    | Own migrator                                                  |
+| `src/persistence/open-database.ts`               | `openDatabase(client)`: migrate, create `Database`            |
+| `src/app/startup.ts`, `src/app/app-services.tsx` | Startup, loading/error screen, services via context           |
 
-### Datei und Verbindung
+### File and connection
 
-- **Ort:** `%APPDATA%\de.belegwerk.desktop\belegwerk.db` (Tauri `app_data_dir`
-  des Identifiers; unter Windows identisch mit `app_config_dir`, das das
-  Plugin selbst verwendet). Name im Plugin: `sqlite:belegwerk.db`.
-  Debug-Builds (`pnpm tauri dev`) öffnen unter demselben Plugin-Namen die
-  Datei `belegwerk-dev.db` (`DB_FILE` in `src-tauri/src/lib.rs`), damit
-  Entwicklung und Tests die echten Daten nie berühren.
-- **Genau eine Verbindung.** `tauri-plugin-sql` öffnet über `Database.load`
-  einen sqlx-Pool mit bis zu zehn Verbindungen; einzelne `execute`-Aufrufe für
-  `PRAGMA`, `BEGIN`, Statements und `COMMIT` landeten dann auf verschiedenen
-  Verbindungen. Deshalb öffnet der Rust-Host die Datenbank selbst
-  (`SqlitePoolOptions` mit `max_connections(1)` und ohne Idle-/Lifetime-Ablauf,
-  damit eine offene Transaktion nicht mit der Verbindung verschwindet) und legt
-  den Pool in die `DbInstances` des Plugins. Das Frontend nutzt `Database.get`
-  (kein `load`); die Capability enthält nur `sql:allow-execute` und
-  `sql:allow-select` – `load` (ersetzte den Pool) und `close` sind nicht
-  erlaubt. Das ist reine Plugin-Konfiguration, keine Logik in Rust.
-- **Im JS serialisiert:** Eine Verbindung genügt nicht, wenn zwei async-Flows
-  sich abwechseln. `SqlConnection` reiht alle Aufrufe ein; `exclusive(fn)` gibt
-  einem Flow die Verbindung für eine ganze Folge, `transaction(fn)` darauf
-  aufbauend `BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK`.
-- **Fremdschlüssel:** sqlx setzt `PRAGMA foreign_keys = ON` beim Öffnen jeder
-  Verbindung (Default, im Host zusätzlich explizit); der Migrator schaltet es
-  am Ende wieder ein.
-- **Journal-Modus:** nicht gesetzt, also SQLite-Default `DELETE` (eine Datei,
-  kein `-wal`) – einfach für Backups (M7, [#32](#backup-und-wiederherstellung-32)).
-- **WebView-Reload:** Die Verbindung lebt im Host weiter. `openDatabase` rollt
-  deshalb eine evtl. offen gebliebene Transaktion zurück.
+- **Location:** `%APPDATA%\de.belegwerk.desktop\belegwerk.db` (Tauri
+  `app_data_dir` of the identifier; on Windows identical to `app_config_dir`,
+  which the plugin itself uses). Name in the plugin: `sqlite:belegwerk.db`.
+  Debug builds (`pnpm tauri dev`) open the file `belegwerk-dev.db` under the
+  same plugin name (`DB_FILE` in `src-tauri/src/lib.rs`), so development and
+  tests never touch the real data.
+- **Exactly one connection.** Via `Database.load`, `tauri-plugin-sql` opens
+  an sqlx pool with up to ten connections; individual `execute` calls for
+  `PRAGMA`, `BEGIN`, statements and `COMMIT` would then end up on different
+  connections. That is why the Rust host opens the database itself
+  (`SqlitePoolOptions` with `max_connections(1)` and no idle/lifetime expiry,
+  so an open transaction does not disappear with the connection) and puts
+  the pool into the plugin's `DbInstances`. The frontend uses `Database.get`
+  (no `load`); the capability only contains `sql:allow-execute` and
+  `sql:allow-select` – `load` (would replace the pool) and `close` are not
+  allowed. This is pure plugin configuration, no logic in Rust.
+- **Serialised in JS:** One connection is not enough when two async flows
+  interleave. `SqlConnection` queues all calls; `exclusive(fn)` gives one
+  flow the connection for a whole sequence, `transaction(fn)` builds
+  `BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK` on top of it.
+- **Foreign keys:** sqlx sets `PRAGMA foreign_keys = ON` when opening each
+  connection (default, also explicit in the host); the migrator switches it
+  back on at the end.
+- **Journal mode:** not set, so SQLite's default `DELETE` (one file, no
+  `-wal`) – simple for backups (M7, [#32](#backup-and-restore-32)).
+- **WebView reload:** The connection lives on in the host. `openDatabase`
+  therefore rolls back a transaction that may have been left open.
 
-Geprüft in der laufenden App (#10): Eine `TEMP`-Tabelle ist nur auf der
-Verbindung sichtbar, die sie angelegt hat. 40 parallele Abfragen darauf
-gelingen mit dem eigenen Pool alle; mit einem per `load` geöffneten
-Standard-Pool schlugen 28 von 40 fehl (`no such table`). Ebenso bleibt
-`PRAGMA foreign_keys = OFF` über Aufrufe hinweg erhalten.
+Verified in the running app (#10): a `TEMP` table is only visible on the
+connection that created it. 40 parallel queries on it all succeed with the
+own pool; with a default pool opened via `load`, 28 of 40 failed
+(`no such table`). Likewise `PRAGMA foreign_keys = OFF` persists across
+calls.
 
-### Backup und Wiederherstellung (#32)
+### Backup and restore (#32)
 
-**Backup:** Einstellungen → Datensicherung → „Backup erstellen“ schreibt per
-`VACUUM INTO` eine konsistente Kopie der ganzen Datenbank (eine
-SQLite-Datei, Vorschlag `belegwerk-backup-YYYY-MM-DD_HHMM.db`) und prüft sie
-([Architektur](architecture.md#datensicherung-32)). Das Backup enthält alle
-Daten einschließlich des Stripe-Schlüssels (Klartext).
+**Backup:** Einstellungen → Datensicherung → "Backup erstellen" writes a
+consistent copy of the whole database via `VACUUM INTO` (one SQLite file,
+suggested `belegwerk-backup-YYYY-MM-DD_HHMM.db`) and verifies it
+([Architecture](architecture.md#backup-32)). The backup contains all data
+including the Stripe key (plain text).
 
-**Backups nie im Datenordner der App speichern**
-(`%APPDATA%\de.belegwerk.desktop` und darunter): Die App lehnt ein solches
-Ziel vor jedem Schreibzugriff ab („Das Backup kann nicht im Datenordner der
-App gespeichert werden …“), weil das Überschreiben von `belegwerk.db` oder
-ihrem Journal die laufende Datenbank zerstören würde. Der Ordner würde zudem
-beim Deinstallieren oder Zurücksetzen mit gelöscht. Nicht erkannt werden
-Umwege über symbolische Links, Junctions, Hardlinks, zugeordnete Laufwerke,
-UNC-Pfade auf den eigenen Rechner (`\\localhost\C$\…`, `\\<rechnername>\…`)
-oder 8.3-Kurznamen des Ordners
-([Architektur](architecture.md#datensicherung-32)).
+**Never save backups in the app's data folder**
+(`%APPDATA%\de.belegwerk.desktop` and below): the app rejects such a target
+before any write ("Das Backup kann nicht im Datenordner der App gespeichert
+werden …"), because overwriting `belegwerk.db` or its journal would destroy
+the running database. The folder would also be deleted on uninstall or
+reset. Not detected are detours via symbolic links, junctions, hard links,
+mapped drives, UNC paths to the own machine (`\\localhost\C$\…`,
+`\\<machine name>\…`) or 8.3 short names of the folder
+([Architecture](architecture.md#backup-32)).
 
-**Wiederherstellen (manuell)** (für Nutzer: [README](../README.md#datensicherung)):
+**Restore (manual)** (for users: [Handbuch](handbuch.md#datensicherung)):
 
-1. Belegwerk schließen (das Fenster schließen; es darf kein Prozess
-   `belegwerk.exe` mehr laufen, sonst ist die Datei gesperrt).
-2. Den Ordner `%APPDATA%\de.belegwerk.desktop` öffnen (Explorer-Adresszeile).
-3. Die vorhandene `belegwerk.db` zur Sicherheit umbenennen oder wegkopieren,
-   z. B. in `belegwerk-vorher.db`.
-4. Die Backup-Datei in diesen Ordner kopieren und in `belegwerk.db`
-   umbenennen.
-5. Liegt dort eine `belegwerk.db-journal` (nur nach einem Absturz mitten in
-   einem Schreibvorgang), gehört sie zur alten Datenbank: löschen bzw. mit
-   verschieben – sonst würde SQLite sie auf das Backup anwenden. `-wal`/`-shm`
-   gibt es nicht (Journal-Modus `DELETE`).
-6. Belegwerk starten.
+1. Close Belegwerk (close the window; no `belegwerk.exe` process may still
+   be running, otherwise the file is locked).
+2. Open the folder `%APPDATA%\de.belegwerk.desktop` (Explorer address bar).
+3. Rename or move away the existing `belegwerk.db` to be safe, e.g. to
+   `belegwerk-vorher.db`.
+4. Copy the backup file into this folder and rename it to `belegwerk.db`.
+5. If there is a `belegwerk.db-journal` (only after a crash in the middle of
+   a write), it belongs to the old database: delete it or move it along –
+   otherwise SQLite would apply it to the backup. There are no `-wal`/`-shm`
+   files (journal mode `DELETE`).
+6. Start Belegwerk.
 
-Verhalten beim Start:
+Behaviour on startup:
 
-- **Backup einer älteren App-Version:** Der Migrator wendet die fehlenden
-  Migrationen an; danach ist die Datenbank auf dem Stand der App.
-- **Backup einer neueren App-Version** (enthält Migrationen, die die App nicht
-  kennt): Der Start bricht mit dem Fehlerbildschirm ab (`MigrationError`
-  `unknown_migration`); die Datei bleibt unverändert. Dann die neuere
-  App-Version installieren oder die alte `belegwerk.db` zurücklegen.
-- **Keine gültige SQLite-Datei** (z. B. leer nach einem fehlgeschlagenen
-  Backup): Eine leere Datei wird wie eine neue Datenbank behandelt (leere
-  Datenbank mit Standardkategorien) – daher vor dem Ersetzen prüfen, dass die
-  Backup-Datei nicht 0 Byte groß ist.
+- **Backup from an older app version:** the migrator applies the missing
+  migrations; afterwards the database matches the app.
+- **Backup from a newer app version** (contains migrations the app does not
+  know): startup aborts with the error screen (`MigrationError`
+  `unknown_migration`); the file stays unchanged. Then install the newer app
+  version or put the old `belegwerk.db` back.
+- **Not a valid SQLite file** (e.g. empty after a failed backup): an empty
+  file is treated like a new database (empty database with default
+  categories) – so check before replacing that the backup file is not 0
+  bytes.
 
 ### Drizzle (`sqlite-proxy`)
 
-`createProxyCallback` bildet Drizzles Methoden auf den Client ab: `run` →
-`execute`, `all`/`values` → `select` mit Zeilen als Wert-Arrays, `get` → erste
-Zeile oder `undefined`. Parameter: Booleans werden zu `1`/`0`, `undefined` zu
-`NULL`; BigInt, Objekte und Bytes werden abgelehnt.
+`createProxyCallback` maps Drizzle's methods to the client: `run` →
+`execute`, `all`/`values` → `select` with rows as value arrays, `get` → first
+row or `undefined`. Parameters: booleans become `1`/`0`, `undefined` becomes
+`NULL`; BigInt, objects and bytes are rejected.
 
-- **Eindeutige Spaltennamen.** Das Plugin liefert Zeilen als Objekte; Drizzle
-  liest Werte nach Position. Doppelte Namen (z. B. `id` aus zwei Tabellen in
-  einem Join) fielen zu einem Schlüssel zusammen – solche Spalten aliasieren
-  (``sql<number>`${categories.id}`.as("category_id")``). Der Test-Client
-  lehnt doppelte Namen ab, Persistence-Tests fallen also auf. Rein numerische
-  Spaltennamen (JS sortiert sie nach vorn) lehnt der Adapter ab.
-- **Zahlen** bindet das Plugin immer als `REAL` (wie `better-sqlite3`). In
-  `INTEGER`-Spalten wandelt SQLite verlustfrei zurück; in einer `TEXT`-Spalte
-  würde aus `2025` aber `'2025.0'` – Zahlen nicht an Text-Spalten binden.
-- **Transaktionen nur über `Database.transaction(async (tx) => …)`.** Drizzles
-  `db.transaction()` schickt `begin`/`commit` als einzelne Aufrufe, zwischen
-  die andere Flows geraten könnten; der Adapter lehnt Transaktions-Statements
-  deshalb ab. Im Callback nur `tx` verwenden – `db` wartet auf das Ende der
-  Transaktion (Deadlock). Repositories kapseln das als `UnitOfWork`
-  ([Architektur](architecture.md#transaktionen-nur-über-unitofworkrun)).
-  Wartet ein Aufruf länger als 10 s auf die Verbindung, meldet
-  `SqlConnection` das per `console.error` als Hinweis auf einen solchen
-  Deadlock.
-- **`db.batch([...])`** läuft atomar in einer Transaktion.
-- **Fehler:** Drizzle verpackt Datenbankfehler in `DrizzleQueryError`
-  („Failed query: …“); die SQLite-Meldung (z. B. `UNIQUE constraint failed`)
-  steht in `cause` (ein `SqlError`).
+- **Unique column names.** The plugin returns rows as objects; Drizzle reads
+  values by position. Duplicate names (e.g. `id` from two tables in a join)
+  would collapse into one key – alias such columns
+  (``sql<number>`${categories.id}`.as("category_id")``). The test client
+  rejects duplicate names, so persistence tests catch it. The adapter rejects
+  purely numeric column names (JS sorts them to the front).
+- **Numbers** are always bound as `REAL` by the plugin (like
+  `better-sqlite3`). In `INTEGER` columns SQLite converts back losslessly;
+  in a `TEXT` column, however, `2025` would become `'2025.0'` – do not bind
+  numbers to text columns.
+- **Transactions only via `Database.transaction(async (tx) => …)`.**
+  Drizzle's `db.transaction()` sends `begin`/`commit` as individual calls
+  that other flows could slip between; the adapter therefore rejects
+  transaction statements. Use only `tx` inside the callback – `db` waits for
+  the transaction to end (deadlock). Repositories wrap this as `UnitOfWork`
+  ([Architecture](architecture.md#transactions-only-via-unitofworkrun)). If a
+  call waits more than 10 s for the connection, `SqlConnection` reports it
+  via `console.error` as a hint at such a deadlock.
+- **`db.batch([...])`** runs atomically in one transaction.
+- **Errors:** Drizzle wraps database errors in `DrizzleQueryError`
+  ("Failed query: …"); the SQLite message (e.g. `UNIQUE constraint failed`)
+  is in `cause` (an `SqlError`).
 
-### Laden im WebView
+### Loading in the WebView
 
-Der Migrator der App kann das Dateisystem nicht lesen (Drizzles eigener
-`sqlite-proxy`-Migrator scheidet daher aus). Die Migrationen werden von Vite
-gebündelt (`bundled-migrations.ts`):
+The app's migrator cannot read the file system (so Drizzle's own
+`sqlite-proxy` migrator is ruled out). The migrations are bundled by Vite
+(`bundled-migrations.ts`):
 
 ```ts
 import journal from "./migrations/meta/_journal.json";
@@ -523,66 +513,65 @@ const files = import.meta.glob<string>("./migrations/*.sql", {
   import: "default",
   eager: true,
 });
-// Reihenfolge aus journal.entries; SQL = files[`./migrations/${entry.tag}.sql`],
-// aufgeteilt an "--> statement-breakpoint".
+// order from journal.entries; SQL = files[`./migrations/${entry.tag}.sql`],
+// split at "--> statement-breakpoint".
 ```
 
-Die Snapshots (`meta/*_snapshot.json`) braucht nur drizzle-kit; sie werden
-nicht importiert und landen nicht im Bundle.
+Only drizzle-kit needs the snapshots (`meta/*_snapshot.json`); they are not
+imported and do not end up in the bundle.
 
 ### Migrator
 
-Tracking-Tabelle `__migrations`:
+Tracking table `__migrations`:
 
-| Spalte       | Inhalt                                            |
-| ------------ | ------------------------------------------------- |
-| `idx`        | Position im Journal (PK)                          |
-| `tag`        | Dateiname ohne `.sql`, eindeutig                  |
-| `hash`       | SHA-256 des SQL (Zeilenenden auf LF normalisiert) |
-| `applied_at` | Zeitpunkt der Anwendung (`toISOString()`)         |
+| Column       | Contents                                           |
+| ------------ | -------------------------------------------------- |
+| `idx`        | Position in the journal (PK)                       |
+| `tag`        | File name without `.sql`, unique                   |
+| `hash`       | SHA-256 of the SQL (line endings normalised to LF) |
+| `applied_at` | Time of application (`toISOString()`)              |
 
-Beim Start werden die angewendeten Migrationen geprüft; der Start bricht mit
-`MigrationError` ab (Fehlerbildschirm), wenn
+On startup the applied migrations are checked; startup aborts with
+`MigrationError` (error screen) if
 
-- `hash_mismatch`: eine angewendete Migration nachträglich geändert wurde
-  (Migrationen werden nie geändert),
-- `unknown_migration`: die DB eine Migration enthält, die die App nicht kennt
-  (DB einer neueren Version),
-- `order_mismatch`: die angewendeten nicht genau die ersten des Journals sind,
-- `foreign_key_violation`: nach dem Migrieren Fremdschlüssel verletzt sind.
+- `hash_mismatch`: an applied migration was changed afterwards (migrations
+  are never changed),
+- `unknown_migration`: the DB contains a migration the app does not know
+  (DB of a newer version),
+- `order_mismatch`: the applied ones are not exactly the first ones of the
+  journal,
+- `foreign_key_violation`: foreign keys are violated after migrating.
 
-**Protokoll.** Ändert eine Migration eine Tabelle, die SQLite nicht per
-`ALTER TABLE` ändern kann, baut drizzle-kit sie neu auf (`__new_<tabelle>`
-anlegen, kopieren, alte löschen, umbenennen) und schreibt
-`PRAGMA foreign_keys=OFF` davor. **Innerhalb einer Transaktion ignoriert
-SQLite dieses Pragma** – bei einer Elterntabelle wie `categories` schlüge das
-`DROP TABLE` fehl. Deshalb läuft alles in einem `exclusive`-Abschnitt der
-Verbindung:
+**Protocol.** If a migration changes a table that SQLite cannot change via
+`ALTER TABLE`, drizzle-kit rebuilds it (create `__new_<table>`, copy, drop
+the old one, rename) and writes `PRAGMA foreign_keys=OFF` before it.
+**Inside a transaction SQLite ignores this pragma** – for a parent table like
+`categories` the `DROP TABLE` would fail. That is why everything runs in an
+`exclusive` section of the connection:
 
-1. `PRAGMA foreign_keys = OFF` (außerhalb jeder Transaktion),
-2. `BEGIN IMMEDIATE`, Tracking-Tabelle anlegen und prüfen, alle ausstehenden
-   Migrationen ausführen und protokollieren,
-3. `PRAGMA foreign_key_check` – liefert es Zeilen: `ROLLBACK` und Fehler,
-4. `COMMIT` (bei jedem Fehler stattdessen `ROLLBACK`, auch für die
-   Tracking-Tabelle),
-5. `PRAGMA foreign_keys = ON` (auch nach einem Fehler; scheitert es dann
-   selbst, wird der ursprüngliche Fehler gemeldet, nicht der des Pragmas).
+1. `PRAGMA foreign_keys = OFF` (outside any transaction),
+2. `BEGIN IMMEDIATE`, create and check the tracking table, run and record
+   all pending migrations,
+3. `PRAGMA foreign_key_check` – if it returns rows: `ROLLBACK` and error,
+4. `COMMIT` (on any error `ROLLBACK` instead, also for the tracking table),
+5. `PRAGMA foreign_keys = ON` (also after an error; if that itself fails,
+   the original error is reported, not the pragma's).
 
-### Hinweise für Repositories (#11 ff.)
+### Notes for repositories (#11 ff.)
 
-- Repositories (`src/persistence/repositories/`) sind Fabriken über eine
-  Drizzle-Instanz (`Db`): `database.db` für einzelne Abfragen oder `tx` in
+- Repositories (`src/persistence/repositories/`) are factories over a
+  Drizzle instance (`Db`): `database.db` for single queries or `tx` in
   `Database.transaction`. `createAppServices` (`src/app/services.ts`)
-  erzeugt sie; UI und Routen erhalten nur Business-Interfaces
-  (`useAppServices()`). Details: [Architektur](architecture.md#repositories-und-unit-of-work-11).
-- **Joins** nie als `select().from(a).innerJoin(b)` (doppelte Spaltennamen),
-  sondern mit explizitem Select-Objekt und eindeutigen Aliassen.
-- **`onConflictDoNothing` (Stripe-Import, #30):** Drizzle 0.45 erzeugt mit
-  `onConflictDoNothing({ target, where })` für den partiellen Index
-  ungültiges SQL. Stattdessen das nackte `.onConflictDoNothing()` verwenden
-  (greift bei jedem Unique-Konflikt) oder vorhandene `external_id`s vorher
-  abfragen.
-- Tests nutzen `createTestDb()` aus
+  creates them; UI and routes only receive business interfaces
+  (`useAppServices()`). Details:
+  [Architecture](architecture.md#repositories-and-unit-of-work-11).
+- **Joins** never as `select().from(a).innerJoin(b)` (duplicate column
+  names), but with an explicit select object and unique aliases.
+- **`onConflictDoNothing` (Stripe import, #30):** Drizzle 0.45 generates
+  invalid SQL for the partial index with `onConflictDoNothing({ target, where })`.
+  Use the bare `.onConflictDoNothing()` instead (applies to every unique
+  conflict) or query existing `external_id`s beforehand.
+- Tests use `createTestDb()` from
   [`src/persistence/__tests__/test-db.ts`](../src/persistence/__tests__/test-db.ts):
-  `better-sqlite3` in-memory hinter demselben `openDatabase` wie die App
-  (Migrator, Proxy-Adapter, `SqlConnection`) – nur das Plugin ist ersetzt.
+  in-memory `better-sqlite3` behind the same `openDatabase` as the app
+  (migrator, proxy adapter, `SqlConnection`) – only the plugin is replaced.

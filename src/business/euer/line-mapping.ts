@@ -11,7 +11,7 @@
  * falls back to the bare position (see {@link describePosition}). Never
  * guess a line: only add lines verified against the official form.
  *
- * Adding a tax year: see docs/data-model.md, "EÜR-Positionen".
+ * Adding a tax year: see docs/data-model.md, "Adding a new tax year".
  */
 
 import type { EuerPosition } from "./positions";

@@ -2,7 +2,7 @@
  * CSV export of the EÜR (#27): maps an {@link EuerResult} to rows of the
  * shared CSV format (`src/business/csv`, same format as the booking export).
  *
- * Layout (docs/architecture.md, "CSV-Export der EÜR (#27)"): a header row,
+ * Layout (docs/architecture.md, "CSV export of the EÜR (#27)"): a header row,
  * then one row per position – income in the order of the view (line 13
  * right after line 12), then expenses – and at the end the totals:
  *

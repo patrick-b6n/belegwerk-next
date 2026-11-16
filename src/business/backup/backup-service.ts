@@ -5,7 +5,7 @@ import { BackupTargetInDatabaseFolderError } from "./backup-target";
 
 /**
  * Port for writing the backup (#32). `src/app` implements it on top of the
- * persistence layer (`VACUUM INTO`, docs/architecture.md, "Datensicherung").
+ * persistence layer (`VACUUM INTO`, docs/architecture.md, "Backup (#32)").
  */
 export interface DatabaseBackup {
   /**

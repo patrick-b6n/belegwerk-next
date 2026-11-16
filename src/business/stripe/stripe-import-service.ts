@@ -2,7 +2,7 @@
  * Stripe import (#30): books the platform's application fees as income and
  * their refunds as expenses (Erlösminderung) – regular bookings with
  * `source: "stripe"` and the Stripe ID as external ID (docs/architecture.md,
- * "Stripe-Import").
+ * "Stripe import (#30)").
  *
  * Flow of `import({ from, to })`:
  * 1. Unit of work: read key and defaults (`loadStripeImportSettings`).

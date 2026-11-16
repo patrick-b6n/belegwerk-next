@@ -1,5 +1,5 @@
 /**
- * Port for the Stripe API (#29, docs/architecture.md, "Stripe-Client"):
+ * Port for the Stripe API (#29, docs/architecture.md, "Stripe client (#29)"):
  * Business stays free of Tauri and HTTP; `src/app` implements it with
  * `tauri-plugin-http` and validates every response into these domain types.
  *
@@ -126,6 +126,6 @@ export interface StripeClient {
  * How far before the import range the import (#30) fetches fees to find
  * refunds inside the range on older fees (see
  * {@link StripeClient.listApplicationFees}). Refunds of fees older than this
- * are missed – documented limitation (docs/architecture.md, "Stripe-Client").
+ * are missed – documented limitation (docs/architecture.md, "Stripe client (#29)").
  */
 export const STRIPE_FEE_REFUND_LOOKBACK_DAYS = 180;

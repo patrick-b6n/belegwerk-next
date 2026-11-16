@@ -2,7 +2,7 @@
  * Auto-update from GitHub releases (#71). The Tauri host does the network
  * access and replaces the exe (src-tauri/src/updater.rs); business only
  * defines the port and the small amount of logic around it
- * (docs/architecture.md, "Auto-Update").
+ * (docs/architecture.md, "Auto-update (#71)").
  */
 
 /** Result of an update check. */

@@ -1,85 +1,82 @@
 # Tests
 
-Tests laufen mit **Vitest** in der **Node-Umgebung**
+Tests run with **Vitest** in the **Node environment**
 ([`vitest.config.ts`](../vitest.config.ts)).
 
-| Script            | Zweck                                       |
-| ----------------- | ------------------------------------------- |
-| `pnpm test`       | alle Tests einmal ausführen (für CI, #7)    |
-| `pnpm test:watch` | Watch-Modus: führt betroffene Tests neu aus |
+| Script            | Purpose                                |
+| ----------------- | -------------------------------------- |
+| `pnpm test`       | run all tests once (for CI, #7)        |
+| `pnpm test:watch` | watch mode: re-runs the affected tests |
 
-Einzelne Dateien oder Testnamen: `pnpm test src/business/format` bzw.
+Single files or test names: `pnpm test src/business/format` or
 `pnpm test -t "parseAmount"`.
 
-## Ablage und Benennung
+## Location and naming
 
-- Tests liegen **neben dem Code** als `<datei>.test.ts`, z. B.
-  `src/business/format/currency.ts` → `currency.test.ts`. Vitest sammelt
+- Tests live **next to the code** as `<file>.test.ts`, e.g.
+  `src/business/format/currency.ts` → `currency.test.ts`. Vitest collects
   `src/**/*.test.{ts,tsx}`.
-- **Test-Hilfen**, die selbst keine Tests sind (Fakes, Fixtures,
-  DB-Helfer), liegen in einem Ordner `__tests__/` im jeweiligen Layer, z. B.
-  `src/business/__tests__/` oder `src/persistence/__tests__/`. So gelten für
-  sie dieselben Layer-Grenzen wie für den Code daneben.
-- Unter `src/routes` werden `*.test.ts[x]` und `__tests__/` vom Router
-  ignoriert (`routeFileIgnorePattern` in `vite.config.ts`), Tests können also
-  auch dort neben den Routen liegen.
-- Produktivcode importiert **nie** aus `*.test.ts` oder `__tests__/`.
-- APIs explizit importieren (`import { describe, expect, it } from "vitest"`),
-  keine Globals.
+- **Test helpers** that are not tests themselves (fakes, fixtures, DB
+  helpers) live in a `__tests__/` folder inside the respective layer, e.g.
+  `src/business/__tests__/` or `src/persistence/__tests__/`. That way the
+  same layer boundaries apply to them as to the code next to them.
+- Under `src/routes`, `*.test.ts[x]` and `__tests__/` are ignored by the
+  router (`routeFileIgnorePattern` in `vite.config.ts`), so tests can live
+  next to the routes too.
+- Production code **never** imports from `*.test.ts` or `__tests__/`.
+- Import APIs explicitly (`import { describe, expect, it } from "vitest"`),
+  no globals.
 
-## Layer
+## Layers
 
-- **Business** (`src/business`): reine Unit-Tests. Repositories und
-  Plattformzugriffe werden durch **In-Memory-Fakes** der Interfaces ersetzt:
-  `createInMemoryDatabase({ clock })` aus
-  `src/business/__tests__/in-memory-repositories.ts` liefert `repositories`
-  und `unitOfWork` (mit Rollback). Die Fakes werfen, wenn innerhalb von
-  `unitOfWork.run` die äußeren Repositories oder ein verschachteltes `run`
-  benutzt werden (in der App ein Deadlock). Die Lint-Regeln von Business
-  gelten auch für Tests – kein Drizzle, kein `better-sqlite3`, kein
-  React/Tauri.
-- **Vertragstests** (`src/business/__tests__/repository-contract.ts`):
-  `describeRepositoryContract(name, setup)` läuft gegen die Fakes und gegen
-  die Drizzle-Repositories auf `better-sqlite3`
-  (`src/persistence/repositories/repositories.test.ts`). Neue
-  Repository-Methoden bekommen dort ihre Fälle, damit Fakes und DB gleich
-  bleiben und jede Abfrage gegen SQLite läuft.
-- **Persistence** (`src/persistence`): Tests gegen **`better-sqlite3`** mit
-  demselben Drizzle-Schema und denselben Migrationen wie die App (#11):
-  `await createTestDb()` aus `src/persistence/__tests__/test-db.ts` liefert pro
-  Test eine frische In-Memory-Datenbank – über denselben Weg wie die App
-  (`openDatabase`: eigener Migrator, `sqlite-proxy`-Adapter), nur das Plugin
-  ist durch einen `better-sqlite3`-Client ersetzt
-  ([Datenmodell](data-model.md)). Abfragen sind daher asynchron.
-  `dbError(query)` liefert die Fehlermeldungen einer fehlschlagenden Abfrage
-  inkl. `cause` (Drizzle verpackt SQLite-Fehler). Der Test-Client lehnt
-  doppelte Ergebnis-Spaltennamen ab, die das Plugin stillschweigend
-  zusammenfassen würde.
-- **UI**: derzeit keine Tests. Bräuchten DOM-Tests später eine Umgebung wie
-  `jsdom`, kann sie pro Datei per `// @vitest-environment jsdom` gesetzt
-  werden.
+- **Business** (`src/business`): pure unit tests. Repositories and platform
+  access are replaced by **in-memory fakes** of the interfaces:
+  `createInMemoryDatabase({ clock })` from
+  `src/business/__tests__/in-memory-repositories.ts` returns `repositories`
+  and `unitOfWork` (with rollback). The fakes throw if the outer repositories
+  or a nested `run` are used inside `unitOfWork.run` (a deadlock in the app).
+  The business lint rules apply to tests as well – no Drizzle, no
+  `better-sqlite3`, no React/Tauri.
+- **Contract tests** (`src/business/__tests__/repository-contract.ts`):
+  `describeRepositoryContract(name, setup)` runs against the fakes and
+  against the Drizzle repositories on `better-sqlite3`
+  (`src/persistence/repositories/repositories.test.ts`). New repository
+  methods get their cases there, so fakes and DB stay in sync and every query
+  runs against SQLite.
+- **Persistence** (`src/persistence`): tests against **`better-sqlite3`**
+  with the same Drizzle schema and the same migrations as the app (#11):
+  `await createTestDb()` from `src/persistence/__tests__/test-db.ts` returns
+  a fresh in-memory database per test – through the same path as the app
+  (`openDatabase`: own migrator, `sqlite-proxy` adapter), only the plugin is
+  replaced by a `better-sqlite3` client ([Data model](data-model.md)).
+  Queries are therefore asynchronous. `dbError(query)` returns the error
+  messages of a failing query including `cause` (Drizzle wraps SQLite
+  errors). The test client rejects duplicate result column names, which the
+  plugin would silently merge.
+- **UI**: no tests so far. Should DOM tests later need an environment like
+  `jsdom`, it can be set per file via `// @vitest-environment jsdom`.
 
 ## TypeScript
 
-Testcode läuft in Node, die App im WebView. Deshalb gibt es ein eigenes
-Projekt [`tsconfig.test.json`](../tsconfig.test.json):
+Test code runs in Node, the app in the WebView. That is why there is a
+separate project [`tsconfig.test.json`](../tsconfig.test.json):
 
-- erfasst `src/**/*.test.ts`, `src/**/*.test.tsx` und `src/**/__tests__/`,
-- erbt alle Optionen von `tsconfig.app.json` (inkl. `@/*`-Alias),
-- hat zusätzlich **Node-Typen** (`node:fs`, `process`, `better-sqlite3`, …).
+- covers `src/**/*.test.ts`, `src/**/*.test.tsx` and `src/**/__tests__/`,
+- inherits all options from `tsconfig.app.json` (including the `@/*` alias),
+- additionally has **Node types** (`node:fs`, `process`, `better-sqlite3`, …).
 
-`tsconfig.app.json` schließt genau diese Dateien aus, damit Node-Typen nicht
-in den WebView-Code durchsickern: `process` oder `node:*` in normalem Code
-unter `src/` bleibt ein Typfehler. `pnpm typecheck` prüft alle Projekte.
+`tsconfig.app.json` excludes exactly these files so Node types do not leak
+into the WebView code: `process` or `node:*` in regular code under `src/`
+stays a type error. `pnpm typecheck` checks all projects.
 
-## Zeitzone
+## Time zone
 
-Die Tests laufen in `Pacific/Pago_Pago` (UTC−11, ohne Sommerzeit), gesetzt
-in `vitest.config.ts`. Code, der versehentlich in lokaler Zeit rechnet,
-fällt so auch auf UTC-Runnern auf. Ein Test in
-`src/business/format/date.test.ts` stellt sicher, dass die Einstellung greift.
+The tests run in `Pacific/Pago_Pago` (UTC−11, no daylight saving time), set
+in `vitest.config.ts`. Code that accidentally computes in local time thus
+fails on UTC runners too. A test in `src/business/format/date.test.ts` makes
+sure the setting takes effect.
 
 ## Coverage
 
-Bewusst noch nicht eingerichtet (bräuchte `@vitest/coverage-v8`). Bei Bedarf
-nachrüsten.
+Deliberately not set up yet (would need `@vitest/coverage-v8`). Add it when
+needed.
